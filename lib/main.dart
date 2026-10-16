@@ -18,7 +18,7 @@ class PensionEtfHelperApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '미래에셋 연금모으기 도우미',
+      title: '미래에셋 연금모으기 풀오토 도우미',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -45,8 +45,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static const String _portfolioPrefsKey = 'user_etf_portfolio_v1';
+  static const String _alarmEnabledKey = 'alarm_enabled_v1';
+  static const String _alarmWeekdayKey = 'alarm_weekday_v1';
+  static const String _alarmHourKey = 'alarm_hour_v1';
+  static const String _alarmMinuteKey = 'alarm_minute_v1';
 
   late TabController _tabController;
   List<EtfItem> _portfolio = EtfItem.defaultPortfolio();
@@ -60,19 +64,62 @@ class _HomeScreenState extends State<HomeScreen>
 
   int _remoteIndex = 0;
   bool _isLoading = false;
+  bool _canOverlay = false;
+  bool _isAccessibilityOn = false;
+
+  bool _alarmEnabled = false;
+  int _alarmWeekday = 1; // 1=월요일, 4=목요일
+  int _alarmHour = 15;
+  int _alarmMinute = 10;
+  String _alarmStatusMsg = '매주 월요일 15:10 (추천 시간)';
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 3, vsync: this);
     _simReport = SimulationService.runFullSimulation(_portfolio);
-    _loadSavedAndRefresh();
+    MStockBridge.setAlarmTriggerHandler(_handleScheduledWakeup);
+    _initApp();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshPermissions();
+    }
+  }
+
+  Future<void> _initApp() async {
+    await _refreshPermissions();
+    await _loadSavedAndRefresh();
+    final autoTriggered = await MStockBridge.consumeAutoTrigger();
+    if (autoTriggered) {
+      await _handleScheduledWakeup();
+    }
+  }
+
+  Future<void> _refreshPermissions() async {
+    final overlay = await MStockBridge.canDrawOverlays();
+    final access = await MStockBridge.isAccessibilityEnabled();
+    if (!mounted) return;
+    setState(() {
+      _canOverlay = overlay;
+      _isAccessibilityOn = access;
+    });
+  }
+
+  Future<void> _handleScheduledWakeup() async {
+    await _loadSavedAndRefresh();
+    await MStockBridge.startFloatingRemote(_portfolio, startIndex: 0);
+    await MStockBridge.launchMStock();
   }
 
   Future<void> _loadSavedAndRefresh() async {
@@ -86,6 +133,10 @@ class _HomeScreenState extends State<HomeScreen>
             .map((e) => EtfItem.fromJson(e as Map<String, dynamic>))
             .toList();
       }
+      _alarmEnabled = prefs.getBool(_alarmEnabledKey) ?? false;
+      _alarmWeekday = prefs.getInt(_alarmWeekdayKey) ?? 1;
+      _alarmHour = prefs.getInt(_alarmHourKey) ?? 15;
+      _alarmMinute = prefs.getInt(_alarmMinuteKey) ?? 10;
     } catch (_) {}
 
     final updatedPortfolio =
@@ -100,6 +151,34 @@ class _HomeScreenState extends State<HomeScreen>
       _simReport = SimulationService.runFullSimulation(_portfolio);
       _isLoading = false;
     });
+  }
+
+  Future<void> _toggleAlarm(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_alarmEnabledKey, enabled);
+    await prefs.setInt(_alarmWeekdayKey, _alarmWeekday);
+    await prefs.setInt(_alarmHourKey, _alarmHour);
+    await prefs.setInt(_alarmMinuteKey, _alarmMinute);
+
+    if (enabled) {
+      final msg = await MStockBridge.scheduleWeeklyAlarm(
+        weekday: _alarmWeekday,
+        hour: _alarmHour,
+        minute: _alarmMinute,
+      );
+      if (!mounted) return;
+      setState(() {
+        _alarmEnabled = true;
+        _alarmStatusMsg = msg;
+      });
+    } else {
+      await MStockBridge.cancelWeeklyAlarm();
+      if (!mounted) return;
+      setState(() {
+        _alarmEnabled = false;
+        _alarmStatusMsg = '예약 자동 실행 꺼짐';
+      });
+    }
   }
 
   Future<void> _savePortfolio() async {
@@ -118,13 +197,31 @@ class _HomeScreenState extends State<HomeScreen>
     return s.replaceAllMapped(reg, (m) => '${m[1]},');
   }
 
+  String _weekdayName(int wd) {
+    switch (wd) {
+      case 1:
+        return '월요일';
+      case 2:
+        return '화요일';
+      case 3:
+        return '수요일';
+      case 4:
+        return '목요일';
+      case 5:
+        return '금요일';
+      default:
+        return '월요일';
+    }
+  }
+
   void _copyText(String label, String value, String toast) {
     Clipboard.setData(ClipboardData(text: value));
     if (!mounted) return;
     ScaffoldMessenger.of(context).clearSnackBars();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(toast, style: const TextStyle(fontWeight: FontWeight.bold)),
+        content:
+            Text(toast, style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF0284C7),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
@@ -145,8 +242,8 @@ class _HomeScreenState extends State<HomeScreen>
           backgroundColor: const Color(0xFF1E293B),
           title: const Text('미니 리모컨 권한 안내'),
           content: const Text(
-            '미래에셋 M-STOCK 화면 위에 [1/6 ~ 6/6] 연속 주문 미니 리모컨을 띄우려면 "다른 앱 위에 표시" 권한이 필요합니다.\n\n'
-            '권한을 허용하시겠습니까? (거부하셔도 수량 자동 복사 후 M-STOCK이 바로 실행됩니다)',
+            '미래에셋 M-STOCK 화면 위에 [🚀 6종목 풀오토 자동매수] 리모컨을 띄우려면 "다른 앱 위에 표시" 권한이 필요합니다.\n\n'
+            '권한을 허용하시겠습니까?',
           ),
           actions: [
             TextButton(
@@ -230,9 +327,9 @@ class _HomeScreenState extends State<HomeScreen>
                 borderRadius: BorderRadius.circular(6),
               ),
               child: const Text(
-                'M-STOCK',
+                'FULL-AUTO',
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: FontWeight.w900,
                   color: Colors.white,
                 ),
@@ -241,8 +338,8 @@ class _HomeScreenState extends State<HomeScreen>
             const SizedBox(width: 8),
             const Expanded(
               child: Text(
-                '연금모으기 원터치 주문 도우미',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+                '연금모으기 6종목 풀오토 도우미',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -267,7 +364,7 @@ class _HomeScreenState extends State<HomeScreen>
           labelColor: const Color(0xFFFFB300),
           unselectedLabelColor: Colors.white60,
           tabs: const [
-            Tab(icon: Icon(Icons.touch_app, size: 18), text: '오늘의 주문(6종)'),
+            Tab(icon: Icon(Icons.smart_toy, size: 18), text: '풀오토 주문(6종)'),
             Tab(icon: Icon(Icons.analytics, size: 18), text: '최적 요일·시간'),
             Tab(icon: Icon(Icons.verified, size: 18), text: '시뮬레이션 검증'),
           ],
@@ -295,7 +392,7 @@ class _HomeScreenState extends State<HomeScreen>
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
-        // 1. 최적 요일 & 시간 추천 배너
+        // 1. 예약 시간 자동 켜짐 & 권한 설정 카드
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
@@ -305,48 +402,138 @@ class _HomeScreenState extends State<HomeScreen>
               end: Alignment.bottomRight,
             ),
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFF38BDF8).withAlpha(100)),
+            border: Border.all(color: const Color(0xFF38BDF8).withAlpha(110)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Icon(Icons.bolt, color: Color(0xFFFBBF24), size: 20),
-                  const SizedBox(width: 6),
-                  const Expanded(
-                    child: Text(
-                      '데이터 분석 추천 매수 타이밍 (9:30 고점 회피)',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: Color(0xFFFBBF24),
+                  const Row(
+                    children: [
+                      Icon(Icons.alarm_on, color: Color(0xFFFBBF24), size: 20),
+                      SizedBox(width: 6),
+                      Text(
+                        '추천 시간 앱 & M-STOCK 자동 켜짐 예약',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                          color: Color(0xFFFBBF24),
+                        ),
                       ),
+                    ],
+                  ),
+                  Switch(
+                    value: _alarmEnabled,
+                    activeThumbColor: const Color(0xFF4ADE80),
+                    onChanged: _toggleAlarm,
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  DropdownButton<int>(
+                    value: _alarmWeekday,
+                    dropdownColor: const Color(0xFF1E293B),
+                    items: const [
+                      DropdownMenuItem(value: 1, child: Text('매주 월요일 (미국최저)')),
+                      DropdownMenuItem(value: 4, child: Text('매주 목요일 (전체최저)')),
+                      DropdownMenuItem(value: 2, child: Text('매주 화요일')),
+                      DropdownMenuItem(value: 3, child: Text('매주 수요일')),
+                      DropdownMenuItem(value: 5, child: Text('매주 금요일')),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setState(() => _alarmWeekday = v);
+                      if (_alarmEnabled) _toggleAlarm(true);
+                    },
+                  ),
+                  const SizedBox(width: 10),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final picked = await showTimePicker(
+                        context: context,
+                        initialTime:
+                            TimeOfDay(hour: _alarmHour, minute: _alarmMinute),
+                      );
+                      if (picked != null) {
+                        setState(() {
+                          _alarmHour = picked.hour;
+                          _alarmMinute = picked.minute;
+                        });
+                        if (_alarmEnabled) _toggleAlarm(true);
+                      }
+                    },
+                    icon: const Icon(Icons.schedule, size: 16),
+                    label: Text(
+                      '${_alarmHour.toString().padLeft(2, '0')}:${_alarmMinute.toString().padLeft(2, '0')}',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                   ),
-                  TextButton.icon(
-                    onPressed: () => _tabController.animateTo(1),
-                    icon: const Icon(Icons.bar_chart, size: 16),
-                    label: const Text('상세분석', style: TextStyle(fontSize: 12)),
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(0, 28),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: () async {
+                      await MStockBridge.triggerTestAlarmIn5Seconds();
+                    },
+                    child: const Text(
+                      '⚡5초뒤 테스트',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF38BDF8)),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-              const Text(
-                '• 추천 요일: 1위 목요일(-0.10%) / 2위 월요일(-0.04%, 미국ETF 최저)\n'
-                '• 추천 시간: 1위 15:00~15:10 (-0.14% 저렴) / 2위 09:10 (-0.09% 저렴)',
-                style: TextStyle(fontSize: 13, height: 1.4, color: Colors.white),
+              Text(
+                '상태: ${_weekdayName(_alarmWeekday)} ${_alarmHour.toString().padLeft(2, '0')}:${_alarmMinute.toString().padLeft(2, '0')} ($_alarmStatusMsg)',
+                style: const TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              const Divider(height: 18, color: Colors.white12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => MStockBridge.requestOverlayPermission(),
+                      icon: Icon(
+                        _canOverlay ? Icons.check_circle : Icons.settings,
+                        size: 15,
+                        color: _canOverlay
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFFFBBF24),
+                      ),
+                      label: Text(
+                        _canOverlay ? '① 리모컨권한 ON' : '① 리모컨권한 켜기',
+                        style: const TextStyle(fontSize: 11.5),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () =>
+                          MStockBridge.requestAccessibilityPermission(),
+                      icon: Icon(
+                        _isAccessibilityOn
+                            ? Icons.check_circle
+                            : Icons.touch_app,
+                        size: 15,
+                        color: _isAccessibilityOn
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFFFF8F00),
+                      ),
+                      label: Text(
+                        _isAccessibilityOn ? '② 풀오토권한 ON' : '② 풀오토권한 켜기',
+                        style: const TextStyle(fontSize: 11.5),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
         const SizedBox(height: 12),
 
-        // 2. 원터치 M-STOCK 미니 리모컨 컨트롤러
+        // 2. 원터치 M-STOCK 풀오토 리모컨 컨트롤러
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
@@ -399,18 +586,19 @@ class _HomeScreenState extends State<HomeScreen>
               Row(
                 children: [
                   Text(
-                    '주문 수량: ${currentItem.maxQuantity}주',
+                    '⚡위칸(+5원): ${_fmt(currentItem.askPrice1)}원  ×  ${currentItem.maxQuantity}주',
                     style: const TextStyle(
-                      fontSize: 18,
+                      fontSize: 16,
                       fontWeight: FontWeight.w900,
                       color: Color(0xFF4ADE80),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '현재가 ${_fmt(currentItem.currentPrice)}원 (합계 ${_fmt(currentItem.totalCost)}원 / 예산 ${_fmt(currentItem.budget)}원)',
-                      style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      '(현재가 ${_fmt(currentItem.currentPrice)}원 / 합계 ${_fmt(currentItem.totalCost)}원)',
+                      style:
+                          const TextStyle(fontSize: 11.5, color: Colors.white70),
                     ),
                   ),
                 ],
@@ -438,11 +626,11 @@ class _HomeScreenState extends State<HomeScreen>
                   Expanded(
                     child: FilledButton.tonal(
                       onPressed: () => _copyText(
-                        'code',
-                        currentItem.code,
-                        '${currentItem.name} 종목코드(${currentItem.code}) 복사됨!',
+                        'ask1',
+                        currentItem.askPrice1.toString(),
+                        '${currentItem.name} 위칸 가격(${_fmt(currentItem.askPrice1)}원) 복사됨!',
                       ),
-                      child: const Text('코드복사'),
+                      child: const Text('위칸가격'),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -453,7 +641,7 @@ class _HomeScreenState extends State<HomeScreen>
                         currentItem.maxQuantity.toString(),
                         '${currentItem.name} 수량(${currentItem.maxQuantity}주) 복사됨!',
                       ),
-                      child: Text('수량(${currentItem.maxQuantity})복사'),
+                      child: Text('수량(${currentItem.maxQuantity})'),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -496,9 +684,9 @@ class _HomeScreenState extends State<HomeScreen>
                     ),
                   ),
                   onPressed: _startFloatingAndLaunchMStock,
-                  icon: const Icon(Icons.open_in_new),
+                  icon: const Icon(Icons.rocket_launch),
                   label: const Text(
-                    '화면 위 미니 리모컨 띄우고 미래에셋 M-STOCK 열기',
+                    '풀오토 미니 리모컨 띄우고 미래에셋 M-STOCK 열기',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                   ),
                 ),
@@ -521,8 +709,8 @@ class _HomeScreenState extends State<HomeScreen>
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   _summaryCell('회차당 총 예산', '${_fmt(totalBudget)}원', Colors.white),
-                  _summaryCell(
-                      '실제 주문 총액', '${_fmt(totalCost)}원', const Color(0xFF38BDF8)),
+                  _summaryCell('위칸(+5원) 주문총액', '${_fmt(totalCost)}원',
+                      const Color(0xFF38BDF8)),
                   _summaryCell('9:30 대비 절약', '+${_fmt(totalSaved)}원',
                       const Color(0xFF4ADE80)),
                 ],
@@ -552,7 +740,7 @@ class _HomeScreenState extends State<HomeScreen>
         const Padding(
           padding: EdgeInsets.symmetric(vertical: 4),
           child: Text(
-            '📋 내 연금 모으기 6종목 자동 수량 계산표 (터치 시 선택/복사)',
+            '📋 내 연금 모으기 6종목 위칸(+5원) 자동 수량 계산표',
             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
           ),
         ),
@@ -654,9 +842,9 @@ class _HomeScreenState extends State<HomeScreen>
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          '현재가 ${_fmt(item.currentPrice)}원 (9:30가 ${_fmt(item.price0930)}원)',
+                          '⚡위칸 ${_fmt(item.askPrice1)}원 (현재가 ${_fmt(item.currentPrice)}원)',
                           style: const TextStyle(
-                              fontSize: 12, color: Colors.white70),
+                              fontSize: 12, color: Color(0xFF4ADE80)),
                         ),
                         Text(
                           '주문액 ${_fmt(item.totalCost)}원 (잔액 ${_fmt(item.remainingBudget)}원)',
@@ -904,7 +1092,7 @@ class _HomeScreenState extends State<HomeScreen>
                       });
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('6개 종목 전체 시뮬레이션 재검증 완료! (정상)'),
+                          content: Text('6개 종목 풀오토 시뮬레이션 재검증 완료! (정상)'),
                           duration: Duration(seconds: 2),
                         ),
                       );
@@ -917,7 +1105,7 @@ class _HomeScreenState extends State<HomeScreen>
               const SizedBox(height: 10),
               Text(
                 '• 회차당 설정 예산: ${_fmt(_simReport.totalBudget)}원\n'
-                '• 6종목 실주문 합계: ${_fmt(_simReport.totalExecutedCost)}원 (총 ${_portfolio.fold<int>(0, (s, e) => s + e.maxQuantity)}주)\n'
+                '• 위칸(+5원) 6종목 실주문 합계: ${_fmt(_simReport.totalExecutedCost)}원 (총 ${_portfolio.fold<int>(0, (s, e) => s + e.maxQuantity)}주)\n'
                 '• 1주 단위 매수 후 잔여 예수금: ${_fmt(_simReport.totalRemainingCash)}원',
                 style: const TextStyle(fontSize: 13, height: 1.5),
               ),

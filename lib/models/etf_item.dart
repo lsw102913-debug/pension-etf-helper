@@ -21,24 +21,27 @@ class EtfItem {
     this.isCompleted = false,
   });
 
-  /// 예산 내 최대 매수 가능 주수 (절대 예산을 초과하지 않음)
-  int get maxQuantity => currentPrice > 0 ? budget ~/ currentPrice : 0;
+  /// 현재가 바로 위 칸 (매도 1호가 = 즉시 체결가, 국내 상장 ETF 호가 단위 +5원)
+  int get askPrice1 => currentPrice > 0 ? currentPrice + 5 : 0;
 
-  /// 실제 주문 소요 금액
-  int get totalCost => maxQuantity * currentPrice;
+  /// 현재가 바로 위 칸(+5원)으로 주문해도 예산을 절대 초과하지 않는 최대 매수 주수
+  int get maxQuantity => askPrice1 > 0 ? budget ~/ askPrice1 : 0;
+
+  /// 위칸(+5원) 기준 실제 주문 소요 금액
+  int get totalCost => maxQuantity * askPrice1;
 
   /// 종목별 예산에서 남는 잔액
   int get remainingBudget => budget - totalCost;
 
-  /// 09:30 가격 대비 1주당 절약 금액 (+면 현재가가 더 저렴해서 이득)
-  int get savedPerShareVs0930 => price0930 > 0 ? (price0930 - currentPrice) : 0;
+  /// 09:30 가격 대비 1주당 절약 금액 (+면 위칸 즉시체결가가 09:30보다 저렴)
+  int get savedPerShareVs0930 => price0930 > 0 ? (price0930 - askPrice1) : 0;
 
   /// 09:30 가격 대비 총 절약 금액
   int get totalSavedVs0930 => savedPerShareVs0930 * maxQuantity;
 
   /// 09:30 대비 등락률 (%) - 음수(-)일수록 09:30보다 저렴함
   double get diffPctVs0930 =>
-      price0930 > 0 ? ((currentPrice - price0930) / price0930) * 100.0 : 0.0;
+      price0930 > 0 ? ((askPrice1 - price0930) / price0930) * 100.0 : 0.0;
 
   EtfItem copyWith({
     String? code,
@@ -87,8 +90,8 @@ class EtfItem {
       );
 
   /// 사용자의 미래에셋 연금 모으기 기본 6종목 (회차당 총 240,000원)
-  static List<EtfItem> defaultPortfolio() => const [
-        EtfItem(
+  static List<EtfItem> defaultPortfolio() => <EtfItem>[
+        const EtfItem(
           code: '379800',
           name: 'KODEX 미국S&P500',
           budget: 90000,

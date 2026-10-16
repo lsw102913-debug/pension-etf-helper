@@ -200,8 +200,8 @@ class MainActivity : FlutterActivity() {
 
         val month = target.get(Calendar.MONTH) + 1
         val day = target.get(Calendar.DAY_OF_MONTH)
-        val hh = target.get(Calendar.HOUR_OF_DAY).toString().padLeft(2, '0')
-        val mm = target.get(Calendar.MINUTE).toString().padLeft(2, '0')
+        val hh = target.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
+        val mm = target.get(Calendar.MINUTE).toString().padStart(2, '0')
         return "${month}월 ${day}일 $hh:$mm 자동 실행 예약됨"
     }
 
